@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Telegram Poll Bot
-Users DM /poll, pick a type, fill in details, and admins approve/reject.
+Telegram Poll Request Bot
+Users send a native Telegram poll in the bot's DMs.
+Admins review it with Accept / Reject buttons.
 """
 
 import os
@@ -13,7 +14,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ConversationHandler,
     filters,
     ContextTypes,
 )
@@ -35,18 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Conversation states
-# ---------------------------------------------------------------------------
-CHOOSING_TYPE, ENTERING_TITLE, ENTERING_DESCRIPTION, ENTERING_OPTIONS = range(4)
-
-# ---------------------------------------------------------------------------
-# Poll type options
-# ---------------------------------------------------------------------------
-POLL_TYPES = ["HOF Poll", "MK Poll", "Duo Poll", "Alias Claim", "Custom Poll"]
-
-# ---------------------------------------------------------------------------
-# In-memory store: poll_id → poll data
-# Survives only for the process lifetime; good enough for most deployments.
+# In-memory store: poll_id → {user_id, question, options}
 # ---------------------------------------------------------------------------
 pending_polls: dict[str, dict] = {}
 
@@ -56,121 +45,71 @@ pending_polls: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Welcome! Use /poll to submit a poll request to the admins."
+        "👋 Welcome!\n\n"
+        "Use /poll to learn how to submit a poll for review."
     )
 
 
+# ---------------------------------------------------------------------------
+# /poll — instructions
+# ---------------------------------------------------------------------------
+async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "📊 *How to submit a poll:*\n\n"
+        "1️⃣ Tap the 📎 *attachment* icon in this chat\n"
+        "2️⃣ Select *Poll*\n"
+        "3️⃣ Fill in your question and options\n"
+        "4️⃣ Send it here\n\n"
+        "Your poll will be sent to the admins for review. "
+        "You'll get a DM when it's approved or rejected.",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /chatid — debug helper (run inside a group to get its ID)
+# ---------------------------------------------------------------------------
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send back the current chat's ID — run this inside your admin/public group."""
     cid = update.effective_chat.id
     await update.message.reply_text(
         f"🆔 This chat's ID is:\n`{cid}`\n\n"
-        f"Configured ADMIN_GROUP_ID: `{ADMIN_GROUP_ID}`\n"
-        f"Configured PUBLIC_GROUP_ID: `{PUBLIC_GROUP_ID}`",
+        f"Configured ADMIN\\_GROUP\\_ID: `{ADMIN_GROUP_ID}`\n"
+        f"Configured PUBLIC\\_GROUP\\_ID: `{PUBLIC_GROUP_ID}`",
         parse_mode="Markdown",
     )
 
 
 # ---------------------------------------------------------------------------
-# /poll  →  show poll-type keyboard
+# User sends a poll in the DM → forward to admin group
 # ---------------------------------------------------------------------------
-async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    keyboard = [
-        [InlineKeyboardButton(pt, callback_data=f"type:{pt}")]
-        for pt in POLL_TYPES
-    ]
-    await update.message.reply_text(
-        "📊 Choose a poll type:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return CHOOSING_TYPE
-
-
-# ---------------------------------------------------------------------------
-# Step 0: poll type selected
-# ---------------------------------------------------------------------------
-async def poll_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    poll_type = query.data.split(":", 1)[1]
-    context.user_data["poll_type"] = poll_type
-    await query.edit_message_text(
-        f"📊 *{poll_type}* selected.\n\n"
-        "Step 1 of 3 — Enter a *title* for your poll:",
-        parse_mode="Markdown",
-    )
-    return ENTERING_TITLE
-
-
-# ---------------------------------------------------------------------------
-# Step 1: title
-# ---------------------------------------------------------------------------
-async def enter_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["title"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Step 2 of 3 — Enter a *description* for your poll:",
-        parse_mode="Markdown",
-    )
-    return ENTERING_DESCRIPTION
-
-
-# ---------------------------------------------------------------------------
-# Step 2: description
-# ---------------------------------------------------------------------------
-async def enter_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["description"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Step 3 of 3 — Enter the *poll options*, one per line "
-        "(2–10 options required):",
-        parse_mode="Markdown",
-    )
-    return ENTERING_OPTIONS
-
-
-# ---------------------------------------------------------------------------
-# Step 3: options  →  send to admin group
-# ---------------------------------------------------------------------------
-async def enter_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    raw = update.message.text.strip()
-    options = [line.strip() for line in raw.splitlines() if line.strip()]
-
-    if len(options) < 2:
-        await update.message.reply_text(
-            "⚠️ Please enter at least *2 options*, one per line:",
-            parse_mode="Markdown",
-        )
-        return ENTERING_OPTIONS
-
-    if len(options) > 10:
-        await update.message.reply_text(
-            "⚠️ Telegram polls support at most *10 options*. "
-            "Please shorten your list:",
-            parse_mode="Markdown",
-        )
-        return ENTERING_OPTIONS
-
+async def receive_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+
+    # Only accept polls sent in private chat (DMs)
+    if update.effective_chat.type != "private":
+        return
+
+    poll = update.message.poll
+    if poll is None:
+        return
+
     poll_id = uuid.uuid4().hex[:10]
+    options_text = "\n".join(
+        f"  {i + 1}. {opt.text}" for i, opt in enumerate(poll.options)
+    )
 
     pending_polls[poll_id] = {
         "user_id": user.id,
-        "user_name": user.full_name,
         "user_handle": f"@{user.username}" if user.username else user.full_name,
-        "poll_type": context.user_data["poll_type"],
-        "title": context.user_data["title"],
-        "description": context.user_data["description"],
-        "options": options,
+        "question": poll.question,
+        "options": [opt.text for opt in poll.options],
+        "original_message_id": update.message.message_id,
     }
-
-    poll = pending_polls[poll_id]
-    options_text = "\n".join(f"  {i + 1}. {o}" for i, o in enumerate(options))
 
     admin_msg = (
         f"📬 *New Poll Submission*\n\n"
-        f"👤 *User:* {poll['user_handle']} (`{poll['user_id']}`)\n"
-        f"🏷 *Type:* {poll['poll_type']}\n"
-        f"📌 *Title:* {poll['title']}\n"
-        f"📝 *Description:* {poll['description']}\n"
+        f"👤 *From:* {pending_polls[poll_id]['user_handle']} (`{user.id}`)\n"
+        f"❓ *Question:* {poll.question}\n"
         f"🗳 *Options:*\n{options_text}\n\n"
         f"_Poll ID: `{poll_id}`_"
     )
@@ -182,33 +121,27 @@ async def enter_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         ]
     ]
 
-    await context.bot.send_message(
-        chat_id=ADMIN_GROUP_ID,
-        text=admin_msg,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-    await update.message.reply_text(
-        "✅ Your poll has been submitted for review.\n"
-        "You'll receive a DM once an admin makes a decision."
-    )
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-# ---------------------------------------------------------------------------
-# /cancel — escape hatch at any step
-# ---------------------------------------------------------------------------
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.clear()
-    await update.message.reply_text("❌ Poll submission cancelled.")
-    return ConversationHandler.END
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=admin_msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        await update.message.reply_text(
+            "✅ Your poll has been submitted for review!\n"
+            "You'll receive a DM once an admin makes a decision."
+        )
+        logger.info("Poll %s submitted by user %s", poll_id, user.id)
+    except Exception as e:
+        logger.error("Failed to send poll to admin group: %s", e)
+        await update.message.reply_text(
+            "⚠️ Something went wrong sending your poll to the admins. Please try again later."
+        )
 
 
 # ---------------------------------------------------------------------------
-# Admin: Accept / Reject callback
+# Admin: Accept / Reject
 # ---------------------------------------------------------------------------
 async def handle_admin_decision(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -220,43 +153,32 @@ async def handle_admin_decision(
     poll = pending_polls.get(poll_id)
 
     if poll is None:
-        # Already processed
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(
-            "⚠️ This submission has already been processed."
-        )
+        await query.message.reply_text("⚠️ This submission has already been processed.")
         return
 
     admin_name = query.from_user.full_name
 
     if action == "accept":
-        # Post a context message + native Telegram poll to the public group
-        await context.bot.send_message(
-            chat_id=PUBLIC_GROUP_ID,
-            text=(
-                f"📊 *{poll['poll_type']}*\n"
-                f"{poll['description']}"
-            ),
-            parse_mode="Markdown",
-        )
+        try:
+            await context.bot.send_poll(
+                chat_id=PUBLIC_GROUP_ID,
+                question=poll["question"],
+                options=poll["options"],
+                is_anonymous=False,
+            )
+        except Exception as e:
+            logger.error("Failed to post poll to public group: %s", e)
+            await query.message.reply_text(
+                f"⚠️ Couldn't post to the public group: {e}"
+            )
+            return
 
-        question = poll["title"]
-        if len(question) > 255:
-            question = question[:252] + "…"
-
-        await context.bot.send_poll(
-            chat_id=PUBLIC_GROUP_ID,
-            question=question,
-            options=poll["options"],
-            is_anonymous=False,
-        )
-
-        # DM the submitter
         try:
             await context.bot.send_message(
                 chat_id=poll["user_id"],
                 text=(
-                    f"✅ Your poll *{poll['title']}* has been *approved* "
+                    f"✅ Your poll *{poll['question']}* has been *approved* "
                     f"and posted to the group!"
                 ),
                 parse_mode="Markdown",
@@ -264,27 +186,23 @@ async def handle_admin_decision(
         except Exception as e:
             logger.warning("Could not DM user %s: %s", poll["user_id"], e)
 
-        # Update admin group message
         await query.edit_message_text(
             text=query.message.text + f"\n\n✅ *Accepted* by {admin_name}",
             parse_mode="Markdown",
         )
 
     elif action == "reject":
-        # DM the submitter
         try:
             await context.bot.send_message(
                 chat_id=poll["user_id"],
                 text=(
-                    f"❌ Your poll submission *{poll['title']}* "
-                    f"was *rejected* by an admin."
+                    f"❌ Your poll *{poll['question']}* was *rejected* by an admin."
                 ),
                 parse_mode="Markdown",
             )
         except Exception as e:
             logger.warning("Could not DM user %s: %s", poll["user_id"], e)
 
-        # Update admin group message
         await query.edit_message_text(
             text=query.message.text + f"\n\n❌ *Rejected* by {admin_name}",
             parse_mode="Markdown",
@@ -299,30 +217,10 @@ async def handle_admin_decision(
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("poll", poll_command)],
-        states={
-            CHOOSING_TYPE: [
-                CallbackQueryHandler(poll_type_chosen, pattern=r"^type:")
-            ],
-            ENTERING_TITLE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_title)
-            ],
-            ENTERING_DESCRIPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_description)
-            ],
-            ENTERING_OPTIONS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_options)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        # Allow the user to restart /poll mid-conversation
-        allow_reentry=True,
-    )
-
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("poll", poll_command))
     app.add_handler(CommandHandler("chatid", chatid))
-    app.add_handler(conv_handler)
+    app.add_handler(MessageHandler(filters.POLL, receive_poll))
     app.add_handler(
         CallbackQueryHandler(handle_admin_decision, pattern=r"^(accept|reject):")
     )
