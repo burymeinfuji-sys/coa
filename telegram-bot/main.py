@@ -8,6 +8,7 @@ Admins review it with Accept / Reject buttons.
 import os
 import uuid
 import logging
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -38,6 +39,12 @@ logger = logging.getLogger(__name__)
 # In-memory store: poll_id → {user_id, question, options}
 # ---------------------------------------------------------------------------
 pending_polls: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Cooldown store: user_id → timestamp of last submission
+# ---------------------------------------------------------------------------
+COOLDOWN_SECONDS = 30
+last_submission: dict[int, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +100,18 @@ async def receive_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if poll is None:
         return
 
+    # Cooldown check
+    now = time.time()
+    last = last_submission.get(user.id, 0)
+    remaining = COOLDOWN_SECONDS - (now - last)
+    if remaining > 0:
+        await update.message.reply_text(
+            f"⏳ You're on cooldown! Please wait *{int(remaining) + 1} seconds* "
+            f"before submitting another poll.",
+            parse_mode="Markdown",
+        )
+        return
+
     poll_id = uuid.uuid4().hex[:10]
     options_text = "\n".join(
         f"  {i + 1}. {opt.text}" for i, opt in enumerate(poll.options)
@@ -128,6 +147,7 @@ async def receive_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        last_submission[user.id] = time.time()
         await update.message.reply_text(
             "✅ Your poll has been submitted for review!\n"
             "You'll receive a DM once an admin makes a decision."
