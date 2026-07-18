@@ -60,6 +60,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send back the current chat's ID — run this inside your admin/public group."""
+    cid = update.effective_chat.id
+    await update.message.reply_text(
+        f"🆔 This chat's ID is:\n`{cid}`\n\n"
+        f"Configured ADMIN_GROUP_ID: `{ADMIN_GROUP_ID}`\n"
+        f"Configured PUBLIC_GROUP_ID: `{PUBLIC_GROUP_ID}`",
+        parse_mode="Markdown",
+    )
+
+
 # ---------------------------------------------------------------------------
 # /poll  →  show poll-type keyboard
 # ---------------------------------------------------------------------------
@@ -310,6 +321,7 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(conv_handler)
     app.add_handler(
         CallbackQueryHandler(handle_admin_decision, pattern=r"^(accept|reject):")
