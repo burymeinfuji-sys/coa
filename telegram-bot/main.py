@@ -68,8 +68,7 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "3️⃣ Fill in your question and options\n"
         "4️⃣ Send it here\n\n"
         "Your poll will be sent to the admins for review. "
-        "You'll get a DM when it's approved or rejected.\n\n"
-        "_Don't worry about poll settings — the bot sets them correctly when posting._",
+        "You'll get a DM when it's approved or rejected.",
         parse_mode="Markdown",
     )
 
