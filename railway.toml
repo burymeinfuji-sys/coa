@@ -1,0 +1,6 @@
+[build]
+buildCommand = "pip install -r telegram-bot/requirements.txt"
+
+[deploy]
+startCommand = "cd telegram-bot && python3 main.py"
+restartPolicyType = "always"
