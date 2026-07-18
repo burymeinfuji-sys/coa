@@ -165,7 +165,7 @@ async def handle_admin_decision(
                 chat_id=PUBLIC_GROUP_ID,
                 question=poll["question"],
                 options=poll["options"],
-                is_anonymous=False,
+                is_anonymous=True,
             )
         except Exception as e:
             logger.error("Failed to post poll to public group: %s", e)
