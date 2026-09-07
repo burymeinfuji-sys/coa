@@ -50,3 +50,4 @@ Thumbs.db
 
 # Telegram bot's private user registry
 telegram-bot/users.json
+telegram-bot/pending_polls.json
